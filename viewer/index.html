@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exploded Movement</title>
+<style>
+  :root {
+    --bg-top: #f3f4f6; --bg-bottom: #d9dde2;
+    --ink: #1c2228; --muted: #5b6670; --panel: rgba(255, 255, 255, 0.88);
+    --line: rgba(28, 34, 40, 0.12); --accent: #a8781f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-top: #22272c; --bg-bottom: #101316;
+      --ink: #e9ecef; --muted: #9aa5ae; --panel: rgba(28, 32, 37, 0.88);
+      --line: rgba(233, 236, 239, 0.14); --accent: #e0ac4c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg-top: #22272c; --bg-bottom: #101316;
+    --ink: #e9ecef; --muted: #9aa5ae; --panel: rgba(28, 32, 37, 0.88);
+    --line: rgba(233, 236, 239, 0.14); --accent: #e0ac4c;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: linear-gradient(var(--bg-top), var(--bg-bottom));
+    color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #view { position: fixed; inset: 0; }
+  .panel {
+    position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 600px; margin: 0 auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 16px; backdrop-filter: blur(8px); box-sizing: border-box;
+  }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  .row label { font-weight: 600; white-space: nowrap; }
+  input[type=range] { flex: 1; accent-color: var(--accent); min-width: 120px; }
+  button, select {
+    font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 12px; cursor: pointer;
+  }
+  select { padding: 4px 8px; }
+  select option { color: #1c2228; }
+  button:hover, select:hover { border-color: var(--accent); }
+  #clock { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 7.5em; }
+  #phase { color: var(--muted); }
+  #info { margin-top: 8px; color: var(--muted); min-height: 1.45em; }
+  #info b { color: var(--ink); font-weight: 600; }
+  details { margin-top: 6px; color: var(--muted); }
+  summary { cursor: pointer; }
+  ol { margin: 6px 0 0; padding-left: 22px; max-height: 28vh; overflow: auto; }
+  li { margin: 2px 0; }
+  .title {
+    position: fixed; top: 16px; left: 16px; right: 16px; color: var(--muted); font-size: 13px; pointer-events: none;
+  }
+  .title b { color: var(--ink); font-size: 15px; display: block; }
+</style>
+<script src="movement_data.js"></script>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                 "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div class="title"><b>The movement, from the database</b>Every solid, its place, the order it comes off and every frame of its running were computed in PostGIS.</div>
+<div class="panel">
+  <div class="row">
+    <button id="run" type="button">Pause</button>
+    <select id="speed" aria-label="Speed">
+      <option value="0.02">1/50 speed</option>
+      <option value="0.1">1/10 speed</option>
+      <option value="1" selected>real time</option>
+      <option value="10">10 x</option>
+      <option value="60">60 x</option>
+    </select>
+    <span id="clock">10:10:30.0</span>
+    <span id="phase"></span>
+  </div>
+  <div class="row">
+    <label for="explode">Explode</label>
+    <input id="explode" type="range" min="0" max="1" step="0.001" value="0">
+    <button id="play" type="button">Take apart</button>
+  </div>
+  <div id="info">Drag to turn, scroll to zoom. Point at a part to name it.</div>
+  <details>
+    <summary>The order it comes apart in</summary>
+    <ol id="order"></ol>
+  </details>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const D = window.MOVEMENT;
+const RUN = D.run;
+const UM = 0.001;              // the file is in micrometres
+const GAP = 2.4;               // mm between layers when fully exploded
+const GAP_SIDEWAYS = 7.0;
+
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+view.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(20, 40, 25);
+scene.add(sun, new THREE.HemisphereLight(0xffffff, 0x8a8f96, 0.5));
+
+const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 1000);
+camera.position.set(31, 45, 55);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 1, 0);
+controls.minDistance = 8;
+controls.maxDistance = 200;
+
+const MAT = {
+  plate:  new THREE.MeshStandardMaterial({ color: 0xd9dcdf, metalness: 0.9, roughness: 0.42 }),
+  gilt:   new THREE.MeshStandardMaterial({ color: 0xe2b65c, metalness: 1.0, roughness: 0.30 }),
+  steel:  new THREE.MeshStandardMaterial({ color: 0xd3d8dd, metalness: 1.0, roughness: 0.22 }),
+  blued:  new THREE.MeshStandardMaterial({ color: 0x2d52a6, metalness: 0.8, roughness: 0.30 }),
+  ruby:   new THREE.MeshStandardMaterial({ color: 0xc4123c, metalness: 0.2, roughness: 0.18, emissive: 0x3c0010 }),
+  spring: new THREE.MeshStandardMaterial({ color: 0x7c828a, metalness: 0.9, roughness: 0.35 }),
+  dial:   new THREE.MeshStandardMaterial({ color: 0xf4f0e6, metalness: 0.0, roughness: 0.65 }),
+};
+const lit = new Map();         // highlighted twin of each material
+function highlight(m) {
+  if (!lit.has(m)) { const h = m.clone(); h.emissive = new THREE.Color(0x5a4210); lit.set(m, h); }
+  return lit.get(m);
+}
+
+function meshOf(pos, material, dx = 0, dy = 0) {
+  const a = new Float32Array(pos.length);
+  for (let i = 0; i < a.length; i += 3) {
+    a[i] = pos[i] * UM - dx; a[i + 1] = pos[i + 1] * UM - dy; a[i + 2] = pos[i + 2] * UM;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(a, 3));
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, MAT[material] || MAT.steel);
+  mesh.userData.base = mesh.material;
+  return mesh;
+}
+
+// The watch's frame has z out of the dial; turn it so the back of the watch faces up.
+const watch = new THREE.Group();
+watch.rotation.x = Math.PI / 2;
+scene.add(watch);
+
+// Each part: an outer group (moved by the explode) holding a pivot on its
+// arbor (turned by the run). Parts that don't turn have the pivot at 0.
+const parts = [];
+let breathing = null;
+for (const p of D.parts) {
+  const outer = new THREE.Group();
+  outer.userData = p;
+  const pivot = new THREE.Group();
+  const [cx, cy] = p.series && p.centre ? p.centre : [0, 0];
+  pivot.position.set(cx, cy, 0);
+  for (const pc of p.pieces) {
+    if (p.part === 'Hairspring' && pc.piece === 'spring' && D.breathing) continue;   // drawn from the breathing poses
+    pivot.add(meshOf(pc.pos, pc.material, cx, cy));
+  }
+  if (p.part === 'Hairspring' && D.breathing) {
+    breathing = D.breathing.map(b => { const m = meshOf(b.pos, 'spring'); m.visible = false; pivot.add(m); return m; });
+  }
+  outer.add(pivot);
+  outer.userData.pivot = pivot;
+  watch.add(outer);
+  parts.push(outer);
+}
+
+function way(p) {
+  return p.dir[0] > 0 ? 'out sideways' : p.dir[2] < 0 ? 'off the back' : 'off the front';
+}
+
+/* ---------------------------------------------------------------- explode */
+// The back of the watch ends up above, the front below; keep the middle of the stack in view.
+const backSpan = GAP * Math.max(0, ...D.parts.filter(p => p.dir[2] < 0).map(p => p.level));
+const frontSpan = GAP * Math.max(0, ...D.parts.filter(p => p.dir[2] > 0).map(p => p.level));
+let panned = 0;
+
+const slider = document.getElementById('explode');
+function setExplode(t) {
+  for (const g of parts) {
+    const p = g.userData;
+    const k = p.level * (p.dir[0] ? GAP_SIDEWAYS : GAP) * t;
+    g.position.set(p.dir[0] * k, p.dir[1] * k, p.dir[2] * k);
+  }
+  const pan = t * (backSpan - frontSpan) / 2 - panned;
+  camera.position.y += pan;
+  controls.target.y += pan;
+  panned += pan;
+}
+slider.addEventListener('input', () => { target = null; setExplode(+slider.value); draw(); });
+
+let target = null;             // "Take apart" eases the slider to the other end
+const play = document.getElementById('play');
+play.addEventListener('click', () => {
+  target = +slider.value < 0.5 ? 1 : 0;
+  play.textContent = target ? 'Put together' : 'Take apart';
+});
+
+/* ---------------------------------------------------------------- the run */
+// One minute, computed frame by frame in the database. After a minute the
+// escapement is back where it started, so the minute repeats; the slow
+// wheels carry on from where they got to.
+const T_END = RUN.t[RUN.t.length - 1];
+const LAST = RUN.t.length - 1;
+function frameAt(tau) {                       // index of the frame at or before tau
+  let lo = 0, hi = LAST;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (RUN.t[mid] <= tau) lo = mid; else hi = mid; }
+  return lo;
+}
+function seriesAt(name, T) {
+  const s = RUN[name];
+  const laps = Math.floor(T / T_END), tau = T - laps * T_END;
+  const i = Math.min(frameAt(tau), LAST - 1);
+  const f = (tau - RUN.t[i]) / (RUN.t[i + 1] - RUN.t[i]);
+  return s[i] + f * (s[i + 1] - s[i]) + laps * s[LAST];
+}
+
+const PHASES = ['locked', 'unlocking', 'impulse', 'drop'];
+let watchTime = 0, running = true, speed = 1, last = performance.now();
+const runBtn = document.getElementById('run');
+runBtn.addEventListener('click', () => { running = !running; runBtn.textContent = running ? 'Pause' : 'Run'; });
+document.getElementById('speed').addEventListener('change', e => { speed = +e.target.value; });
+const clock = document.getElementById('clock');
+const phaseText = document.getElementById('phase');
+
+function pose(T) {
+  for (const g of parts) {
+    const p = g.userData;
+    if (p.series) g.userData.pivot.rotation.z = THREE.MathUtils.degToRad(seriesAt(p.series, T));
+  }
+  if (breathing) {
+    const db = seriesAt('balance', T);
+    const k = Math.max(0, Math.min(breathing.length - 1, Math.round((db - D.breathing[0].dbeta) / 10)));
+    breathing.forEach((m, i) => { m.visible = i === k; });
+  }
+  const s = D.time.h * 3600 + D.time.m * 60 + D.time.s + T;
+  const hh = Math.floor(s / 3600) % 12 || 12, mm = Math.floor(s / 60) % 60, ss = s % 60;
+  clock.textContent = `${hh}:${String(mm).padStart(2, '0')}:${ss.toFixed(1).padStart(4, '0')}`;
+  if (speed <= 0.1) {
+    const code = RUN.phase[frameAt(T % T_END)];
+    const stone = code >= 8 ? ', exit stone' : code >= 4 ? ', entry stone' : '';
+    phaseText.textContent = 'escapement: ' + PHASES[code % 4] + stone;
+  } else {
+    phaseText.textContent = '';
+  }
+}
+
+/* ---------------------------------------------------------------- the order it comes apart in */
+const rounds = new Map();
+for (const p of D.parts) {
+  if (p.base) continue;
+  if (!rounds.has(p.round)) rounds.set(p.round, []);
+  rounds.get(p.round).push(p.part + ' (' + way(p) + ')');
+}
+const order = document.getElementById('order');
+for (const [, names] of [...rounds].sort((a, b) => a[0] - b[0])) {
+  const li = document.createElement('li');
+  li.textContent = names.join(', ');
+  order.appendChild(li);
+}
+const lastLi = document.createElement('li');
+lastLi.textContent = 'Mainplate: what everything came off';
+order.appendChild(lastLi);
+
+/* ---------------------------------------------------------------- name the part under the pointer */
+const info = document.getElementById('info');
+const ray = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let hovered = null;
+function setHover(g) {
+  if (g === hovered) return;
+  if (hovered) hovered.traverse(m => { if (m.isMesh) m.material = m.userData.base; });
+  hovered = g;
+  if (g) {
+    g.traverse(m => { if (m.isMesh) m.material = highlight(m.userData.base); });
+    const p = g.userData;
+    info.innerHTML = p.base
+      ? '<b>Mainplate</b>: everything else comes off it'
+      : `<b>${p.part}</b>: comes off in round ${p.round}, ${way(p)}`;
+  } else {
+    info.textContent = 'Drag to turn, scroll to zoom. Point at a part to name it.';
+  }
+}
+function partOf(obj) { while (obj && !parts.includes(obj)) obj = obj.parent; return obj; }
+renderer.domElement.addEventListener('pointermove', (e) => {
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(parts, true).find(h => h.object.visible);
+  setHover(hit ? partOf(hit.object) : null);
+});
+
+/* ---------------------------------------------------------------- drawing */
+function draw() { controls.update(); renderer.render(scene, camera); }
+const panel = document.querySelector('.panel');
+function resize() {
+  // on a narrow screen the panel spans the width: draw the watch between the title and the panel
+  const narrow = window.innerWidth < 700;
+  view.style.bottom = narrow ? (panel.offsetHeight + 24) + 'px' : '0';
+  view.style.top = narrow ? (document.querySelector('.title').offsetHeight + 16) + 'px' : '0';
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false);
+  renderer.domElement.style.width = w + 'px';
+  renderer.domElement.style.height = h + 'px';
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  draw();
+}
+window.addEventListener('resize', resize);
+panel.querySelector('details').addEventListener('toggle', resize);
+resize();
+setExplode(0);
+pose(0);
+
+renderer.setAnimationLoop((now) => {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (running) { watchTime += dt * speed; pose(watchTime); }
+  if (target !== null) {
+    const v = +slider.value, d = target - v;
+    const next = Math.abs(d) < 0.002 ? target : v + d * 0.06;
+    slider.value = next;
+    setExplode(next);
+    if (next === target) target = null;
+  }
+  draw();
+});
+
+// for checking a pose without waiting (the page renders nothing on its own while hidden)
+window.showAt = (T, explode) => { if (explode !== undefined) { slider.value = explode; setExplode(explode); } watchTime = T; pose(T); draw(); };
+</script>
+</body>
+</html>
