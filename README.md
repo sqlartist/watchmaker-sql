@@ -1,5 +1,8 @@
 # The Watchmaker
 
+> **Read the full story:** For the full breakdown of how this project came to be and the initial metrics, check out the article on [Medium](https://medium.com/@trevor.dwyer/the-watchmaker-building-a-mechanical-watch-in-a-database-275dae48e0b5). Follow me there for future updates! You can also read it free on [my blog](https://sqlartist.github.io/posts/the-watchmaker-building-a-mechanical-watch-in-a-database/).
+
+
 A mechanical watch, built from geometry in a database, inspired by Bartosz
 Ciechanowski's [Mechanical Watch](https://ciechanow.ski/mechanical-watch/).
 
